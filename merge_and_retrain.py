@@ -125,7 +125,7 @@ def evaluate_horizon(df, horizon, test_frac=0.2):
     results["naive_r2"] = r2_score(y_test, naive_pred)
 
     # --- Ridge ---
-    ridge = Ridge(alpha=10.0)
+    ridge = Ridge(alpha=1.0)
     ridge.fit(X_train, y_train)
     ridge_pred = ridge.predict(X_test)
     results["ridge_rmse"] = np.sqrt(mean_squared_error(y_test, ridge_pred))
