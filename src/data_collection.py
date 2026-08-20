@@ -10,6 +10,10 @@ API_KEY = os.getenv("OPENWEATHER_API_KEY")
 LAT, LON = 29.3956, 71.6836  # Bahawalpur
 
 
+# ============================================================
+# AQI / POLLUTION FUNCTIONS
+# ============================================================
+
 def calculate_aqi(concentration, breakpoints):
     """
     Generic EPA AQI calculation for one pollutant.
@@ -89,10 +93,13 @@ def fetch_historical_data(days_back=30):
 
 def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
     df_new = pd.DataFrame([row])
+    df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
         df_existing = pd.read_csv(filepath)
+        df_existing["datetime"] = pd.to_datetime(df_existing["datetime"]).dt.floor("h")
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_combined.drop_duplicates(subset="datetime", inplace=True)
+        df_combined.drop_duplicates(subset="datetime", keep="last", inplace=True)
+        df_combined.sort_values("datetime", inplace=True)
     else:
         df_combined = df_new
     df_combined.to_csv(filepath, index=False)
@@ -101,20 +108,159 @@ def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
 
 def save_many_to_csv(rows, filepath="data/raw_aqi_data.csv"):
     df_new = pd.DataFrame(rows)
+    df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
         df_existing = pd.read_csv(filepath)
+        df_existing["datetime"] = pd.to_datetime(df_existing["datetime"]).dt.floor("h")
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_combined.drop_duplicates(subset="datetime", inplace=True)
+        df_combined.drop_duplicates(subset="datetime", keep="last", inplace=True)
+        df_combined.sort_values("datetime", inplace=True)
     else:
         df_combined = df_new
     df_combined.to_csv(filepath, index=False)
     print(f"Saved {len(rows)} historical rows. Total in file: {len(df_combined)}")
 
 
+# ============================================================
+# WEATHER FUNCTIONS
+# ============================================================
+
+def fetch_current_weather():
+    url = f"http://api.openweathermap.org/data/2.5/weather?lat={LAT}&lon={LON}&appid={API_KEY}&units=metric"
+    response = requests.get(url)
+    data = response.json()
+
+    row = {
+        "datetime": datetime.fromtimestamp(data["dt"]),
+        "temp": data["main"]["temp"],
+        "humidity": data["main"]["humidity"],
+        "pressure": data["main"]["pressure"],
+        "wind_speed": data["wind"]["speed"],
+        "wind_deg": data["wind"].get("deg", None),
+    }
+    return row
+
+
+def fetch_historical_weather(days_back=30):
+    """
+    Uses OpenWeather's timemachine endpoint (One Call 3.0) - one day at a time.
+    NOTE: This endpoint may require billing setup even for free-tier usage.
+    Not currently used in __main__ — kept as a fallback/reference.
+    Prefer fetch_open_meteo_historical() below (free, no billing risk).
+    """
+    rows = []
+    for day_offset in range(days_back, 0, -1):
+        timestamp = int((datetime.now() - timedelta(days=day_offset)).timestamp())
+        url = (
+            f"http://api.openweathermap.org/data/3.0/onecall/timemachine"
+            f"?lat={LAT}&lon={LON}&dt={timestamp}&appid={API_KEY}&units=metric"
+        )
+        response = requests.get(url)
+        data = response.json()
+
+        if "data" not in data and "current" not in data:
+            print(f"Skipping day_offset={day_offset}: {data}")
+            continue
+
+        record = data.get("current", data.get("data", [{}])[0])
+        rows.append({
+            "datetime": datetime.fromtimestamp(record["dt"]),
+            "temp": record.get("temp"),
+            "humidity": record.get("humidity"),
+            "pressure": record.get("pressure"),
+            "wind_speed": record.get("wind_speed"),
+            "wind_deg": record.get("wind_deg"),
+        })
+    return rows
+
+
+def fetch_open_meteo_historical(days_back=30):
+    """
+    Free, no-API-key historical weather from Open-Meteo Archive API.
+    Primary source for historical weather backfill — no billing risk,
+    unlike OpenWeather's One Call 3.0 timemachine endpoint.
+    """
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days_back)
+
+    url = (
+        f"https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&start_date={start_date}&end_date={end_date}"
+        f"&hourly=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m"
+        f"&wind_speed_unit=ms"
+        f"&timezone=auto"
+    )
+    response = requests.get(url)
+    data = response.json()
+
+    if "hourly" not in data:
+        print("Error fetching Open-Meteo data:", data)
+        return []
+
+    hourly = data["hourly"]
+    rows = []
+    for i in range(len(hourly["time"])):
+        rows.append({
+            "datetime": pd.to_datetime(hourly["time"][i]),
+            "temp": hourly["temperature_2m"][i],
+            "humidity": hourly["relative_humidity_2m"][i],
+            "pressure": hourly["surface_pressure"][i],
+            "wind_speed": hourly["wind_speed_10m"][i],
+            "wind_deg": hourly["wind_direction_10m"][i],
+        })
+    return rows
+
+
+def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
+    df_new = pd.DataFrame(rows)
+    df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
+    if os.path.exists(filepath):
+        df_existing = pd.read_csv(filepath)
+        df_existing["datetime"] = pd.to_datetime(df_existing["datetime"]).dt.floor("h")
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        df_combined.drop_duplicates(subset="datetime", keep="last", inplace=True)
+        df_combined.sort_values("datetime", inplace=True)
+    else:
+        df_combined = df_new
+    df_combined.to_csv(filepath, index=False)
+    print(f"Saved {len(rows)} weather rows. Total in file: {len(df_combined)}")
+
+
+def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
+    df_new = pd.DataFrame([row])
+    df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
+    if os.path.exists(filepath):
+        df_existing = pd.read_csv(filepath)
+        df_existing["datetime"] = pd.to_datetime(df_existing["datetime"]).dt.floor("h")
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        df_combined.drop_duplicates(subset="datetime", keep="last", inplace=True)
+        df_combined.sort_values("datetime", inplace=True)
+    else:
+        df_combined = df_new
+    df_combined.to_csv(filepath, index=False)
+    print(f"Saved weather row: {row}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 if __name__ == "__main__":
+    # --- Pollution data (existing, working) ---
     historical_rows = fetch_historical_data(days_back=30)
     if historical_rows:
         save_many_to_csv(historical_rows)
 
     current_row = fetch_current_data()
     save_to_csv(current_row)
+
+    # --- Weather data: Open-Meteo historical backfill (free, no billing risk) ---
+    historical_weather = fetch_open_meteo_historical(days_back=30)
+    if historical_weather:
+        save_weather_to_csv(historical_weather)
+
+    # --- Current weather (OpenWeather, real-time) ---
+    current_weather = fetch_current_weather()
+    print("Current weather:", current_weather)
+    save_current_weather_to_csv(current_weather)

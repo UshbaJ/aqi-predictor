@@ -17,6 +17,8 @@ def add_time_features(df):
 def add_lag_features(df):
     df["aqi_lag_1h"] = df["aqi_epa"].shift(1)
     df["aqi_lag_24h"] = df["aqi_epa"].shift(24)
+    df["aqi_lag_48h"] = df["aqi_epa"].shift(48)
+    df["aqi_lag_72h"] = df["aqi_epa"].shift(72)
     df["pm2_5_lag_1h"] = df["pm2_5"].shift(1)
     df["pm2_5_lag_24h"] = df["pm2_5"].shift(24)
     df["pm10_lag_1h"] = df["pm10"].shift(1)
@@ -39,15 +41,13 @@ def build_feature_dataset(filepath="data/raw_aqi_data.csv", horizon_hours=1):
     df = add_lag_features(df)
     df = add_rolling_features(df)
     df = add_target(df, horizon_hours)
-
-    # Drop rows with NaNs created by lag/rolling/target shifting
     df = df.dropna().reset_index(drop=True)
     return df
 
 
 if __name__ == "__main__":
-    features_df = build_feature_dataset()
-    print(features_df.shape)
-    print(features_df.head())
-    features_df.to_csv("data/features_data.csv", index=False)
-    print("Saved to data/features_data.csv")
+    for horizon in [1, 24, 72]:
+        features_df = build_feature_dataset(horizon_hours=horizon)
+        out_path = f"data/features_data_{horizon}h.csv"
+        features_df.to_csv(out_path, index=False)
+        print(f"Horizon {horizon}h -> {features_df.shape} rows, saved to {out_path}")
