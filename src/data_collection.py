@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -8,6 +9,9 @@ load_dotenv()
 API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
 LAT, LON = 29.3956, 71.6836  # Bahawalpur
+
+# OpenWeather's Air Pollution History API only goes back to 2020-11-27
+EARLIEST_AQI_DATE = datetime(2020, 11, 27)
 
 
 # ============================================================
@@ -63,9 +67,10 @@ def fetch_current_data():
     return row
 
 
-def fetch_historical_data(days_back=30):
-    end = int(datetime.now().timestamp())
-    start = int((datetime.now() - timedelta(days=days_back)).timestamp())
+def _fetch_aqi_window(start_dt, end_dt):
+    """Single API call for one start/end window. Returns list of rows."""
+    start = int(start_dt.timestamp())
+    end = int(end_dt.timestamp())
 
     url = (
         f"http://api.openweathermap.org/data/2.5/air_pollution/history"
@@ -75,7 +80,7 @@ def fetch_historical_data(days_back=30):
     data = response.json()
 
     if "list" not in data:
-        print("Error or no historical data:", data)
+        print(f"  WARNING: no data for {start_dt.date()} to {end_dt.date()}: {data}")
         return []
 
     rows = []
@@ -89,6 +94,40 @@ def fetch_historical_data(days_back=30):
             **components
         })
     return rows
+
+
+def fetch_historical_data(days_back=30, chunk_by_year=False):
+    """
+    Fetch historical AQI data.
+    If chunk_by_year=True, days_back is ignored and instead pulls in yearly
+    chunks from EARLIEST_AQI_DATE (or today - days_back, whichever is later)
+    up to now. This avoids timeouts/truncation on multi-year requests.
+    """
+    if not chunk_by_year:
+        end = datetime.now()
+        start = end - timedelta(days=days_back)
+        return _fetch_aqi_window(start, end)
+
+    # Yearly-chunked pull
+    overall_start = max(EARLIEST_AQI_DATE, datetime.now() - timedelta(days=365 * 5))
+    overall_end = datetime.now()
+
+    all_rows = []
+    chunk_start = overall_start
+    chunk_num = 1
+    while chunk_start < overall_end:
+        chunk_end = min(chunk_start + timedelta(days=365), overall_end)
+        print(f"AQI chunk {chunk_num}: {chunk_start.date()} to {chunk_end.date()}...")
+
+        rows = _fetch_aqi_window(chunk_start, chunk_end)
+        print(f"  -> {len(rows)} rows")
+        all_rows.extend(rows)
+
+        chunk_start = chunk_end
+        chunk_num += 1
+        time.sleep(1)  # be polite to the API, avoid rate limits
+
+    return all_rows
 
 
 def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
@@ -107,6 +146,9 @@ def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
 
 
 def save_many_to_csv(rows, filepath="data/raw_aqi_data.csv"):
+    if not rows:
+        print("No AQI rows to save.")
+        return
     df_new = pd.DataFrame(rows)
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
@@ -141,48 +183,8 @@ def fetch_current_weather():
     return row
 
 
-def fetch_historical_weather(days_back=30):
-    """
-    Uses OpenWeather's timemachine endpoint (One Call 3.0) - one day at a time.
-    NOTE: This endpoint may require billing setup even for free-tier usage.
-    Not currently used in __main__ — kept as a fallback/reference.
-    Prefer fetch_open_meteo_historical() below (free, no billing risk).
-    """
-    rows = []
-    for day_offset in range(days_back, 0, -1):
-        timestamp = int((datetime.now() - timedelta(days=day_offset)).timestamp())
-        url = (
-            f"http://api.openweathermap.org/data/3.0/onecall/timemachine"
-            f"?lat={LAT}&lon={LON}&dt={timestamp}&appid={API_KEY}&units=metric"
-        )
-        response = requests.get(url)
-        data = response.json()
-
-        if "data" not in data and "current" not in data:
-            print(f"Skipping day_offset={day_offset}: {data}")
-            continue
-
-        record = data.get("current", data.get("data", [{}])[0])
-        rows.append({
-            "datetime": datetime.fromtimestamp(record["dt"]),
-            "temp": record.get("temp"),
-            "humidity": record.get("humidity"),
-            "pressure": record.get("pressure"),
-            "wind_speed": record.get("wind_speed"),
-            "wind_deg": record.get("wind_deg"),
-        })
-    return rows
-
-
-def fetch_open_meteo_historical(days_back=30):
-    """
-    Free, no-API-key historical weather from Open-Meteo Archive API.
-    Primary source for historical weather backfill — no billing risk,
-    unlike OpenWeather's One Call 3.0 timemachine endpoint.
-    """
-    end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=days_back)
-
+def _fetch_open_meteo_window(start_date, end_date):
+    """Single API call for one start/end date window. Returns list of rows."""
     url = (
         f"https://archive-api.open-meteo.com/v1/archive"
         f"?latitude={LAT}&longitude={LON}"
@@ -195,7 +197,7 @@ def fetch_open_meteo_historical(days_back=30):
     data = response.json()
 
     if "hourly" not in data:
-        print("Error fetching Open-Meteo data:", data)
+        print(f"  WARNING: no weather data for {start_date} to {end_date}: {data}")
         return []
 
     hourly = data["hourly"]
@@ -212,7 +214,42 @@ def fetch_open_meteo_historical(days_back=30):
     return rows
 
 
+def fetch_open_meteo_historical(days_back=30, chunk_by_year=False):
+    """
+    Free, no-API-key historical weather from Open-Meteo Archive API.
+    If chunk_by_year=True, pulls in yearly chunks matching the AQI pull's
+    date range for alignment (defaults to same 5-year / EARLIEST_AQI_DATE floor).
+    """
+    if not chunk_by_year:
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days_back)
+        return _fetch_open_meteo_window(start_date, end_date)
+
+    overall_start = max(EARLIEST_AQI_DATE, datetime.now() - timedelta(days=365 * 5)).date()
+    overall_end = datetime.now().date()
+
+    all_rows = []
+    chunk_start = overall_start
+    chunk_num = 1
+    while chunk_start < overall_end:
+        chunk_end = min(chunk_start + timedelta(days=365), overall_end)
+        print(f"Weather chunk {chunk_num}: {chunk_start} to {chunk_end}...")
+
+        rows = _fetch_open_meteo_window(chunk_start, chunk_end)
+        print(f"  -> {len(rows)} rows")
+        all_rows.extend(rows)
+
+        chunk_start = chunk_end
+        chunk_num += 1
+        time.sleep(1)  # be polite to the API
+
+    return all_rows
+
+
 def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
+    if not rows:
+        print("No weather rows to save.")
+        return
     df_new = pd.DataFrame(rows)
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
@@ -247,20 +284,21 @@ def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
 # ============================================================
 
 if __name__ == "__main__":
-    # --- Pollution data (existing, working) ---
-    historical_rows = fetch_historical_data(days_back=30)
-    if historical_rows:
-        save_many_to_csv(historical_rows)
+    # --- 5-year yearly-chunked pull: AQI ---
+    print("=== Pulling historical AQI data (yearly chunks) ===")
+    historical_rows = fetch_historical_data(chunk_by_year=True)
+    save_many_to_csv(historical_rows)
 
+    # --- Current AQI (single point, always run) ---
     current_row = fetch_current_data()
     save_to_csv(current_row)
 
-    # --- Weather data: Open-Meteo historical backfill (free, no billing risk) ---
-    historical_weather = fetch_open_meteo_historical(days_back=30)
-    if historical_weather:
-        save_weather_to_csv(historical_weather)
+    # --- 5-year yearly-chunked pull: weather ---
+    print("\n=== Pulling historical weather data (yearly chunks) ===")
+    historical_weather = fetch_open_meteo_historical(chunk_by_year=True)
+    save_weather_to_csv(historical_weather)
 
-    # --- Current weather (OpenWeather, real-time) ---
+    # --- Current weather (single point, always run) ---
     current_weather = fetch_current_weather()
     print("Current weather:", current_weather)
     save_current_weather_to_csv(current_weather)
