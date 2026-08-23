@@ -89,3 +89,64 @@ def build_full_dataset():
     featured = engineer_features(merged)
     targeted = build_targets(featured, horizons=HORIZONS)
     return targeted
+
+
+def load_from_feature_store():
+    """
+    Attempt to read the engineered feature set back from the Hopsworks
+    Feature Store (aqi_weather_features, v1). This is the "real" feature
+    store path required by the project spec.
+
+    Returns the raw feature-group DataFrame (already engineered - no need
+    to re-run engineer_features/build_targets, since feature_pipeline.py
+    already wrote the fully-engineered columns including target_24h/72h).
+
+    Raises whatever exception hsfs raises on failure - caller decides
+    whether to fall back.
+    """
+    import os
+    import hopsworks
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    api_key = os.getenv("HOPSWORKS_API_KEY")
+    project = hopsworks.login(api_key_value=api_key)
+    fs = project.get_feature_store()
+    fg = fs.get_feature_group(name="aqi_weather_features", version=1)
+
+    # use_hive=True forces the older Spark/Hive read path. As of writing,
+    # Hopsworks' newer ArrowFlight/DuckDB read service has a server-side bug
+    # ("Set changed size during iteration") that affects both this project's
+    # instance and the default read path - use_hive is the documented
+    # workaround, kept here in case it's fixed server-side in the future.
+    df = fg.read(read_options={"use_hive": True})
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return df
+
+
+def load_features(source="auto"):
+    """
+    Main entrypoint for train.py. Tries the Hopsworks Feature Store first
+    (source="auto" or "hopsworks"), falls back to local CSVs on any failure
+    (source="auto" or "local" explicitly forces local).
+
+    This keeps training unblocked by the known Hopsworks read-service bug,
+    while still using the feature store whenever it's actually available.
+    """
+    if source == "local":
+        return build_full_dataset(), "local"
+
+    if source in ("auto", "hopsworks"):
+        try:
+            print("Attempting to load features from Hopsworks Feature Store...")
+            df = load_from_feature_store()
+            print(f"Loaded {len(df)} rows from Hopsworks Feature Store.")
+            return df, "hopsworks"
+        except Exception as e:
+            if source == "hopsworks":
+                raise  # caller explicitly wanted Hopsworks - don't hide the error
+            print(f"Hopsworks Feature Store read failed ({type(e).__name__}); "
+                  f"falling back to local CSVs.")
+            return build_full_dataset(), "local"
+
+    raise ValueError(f"Unknown source: {source!r}. Use 'auto', 'hopsworks', or 'local'.")
