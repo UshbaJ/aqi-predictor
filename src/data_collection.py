@@ -132,6 +132,7 @@ def fetch_historical_data(days_back=30, chunk_by_year=False):
 
 
 def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     df_new = pd.DataFrame([row])
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
@@ -147,6 +148,7 @@ def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
 
 
 def save_many_to_csv(rows, filepath="data/raw_aqi_data.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     if not rows:
         print("No AQI rows to save.")
         return
@@ -248,6 +250,7 @@ def fetch_open_meteo_historical(days_back=30, chunk_by_year=False):
 
 
 def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     if not rows:
         print("No weather rows to save.")
         return
@@ -266,6 +269,7 @@ def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
 
 
 def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     df_new = pd.DataFrame([row])
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
     if os.path.exists(filepath):
