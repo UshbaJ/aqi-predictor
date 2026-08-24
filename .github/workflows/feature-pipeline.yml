@@ -1,0 +1,39 @@
+name: Hourly Feature Pipeline
+
+# Runs every hour: pulls the latest AQI + weather reading and pushes it
+# into the Hopsworks Feature Store. Keeps the feature store current
+# without needing to run data_collection.py manually.
+
+on:
+  schedule:
+    - cron: "5 * * * *"   # 5 minutes past every hour (UTC)
+  workflow_dispatch: {}     # allows manual trigger from the Actions tab
+
+jobs:
+  update-features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Pull recent AQI + weather history (enough for lag features)
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: python src/data_collection.py --hours-back 48
+
+      - name: Push updated features to Hopsworks
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+        run: python src/feature_pipeline.py

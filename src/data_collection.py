@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import argparse
 
 load_dotenv()
 API_KEY = os.getenv("OPENWEATHER_API_KEY")
@@ -284,21 +285,45 @@ def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
 # ============================================================
 
 if __name__ == "__main__":
-    # --- 5-year yearly-chunked pull: AQI ---
-    print("=== Pulling historical AQI data (yearly chunks) ===")
-    historical_rows = fetch_historical_data(chunk_by_year=True)
-    save_many_to_csv(historical_rows)
+    parser = argparse.ArgumentParser(description="AQI + weather data collection")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Run the full 5-year yearly-chunked historical pull instead of "
+             "just fetching recent data. Use this once for initial setup.",
+    )
+    parser.add_argument(
+        "--hours-back",
+        type=int,
+        default=0,
+        help="Pull the last N hours of history instead of just the current "
+             "reading. Useful on CI runners with no local CSV history, so "
+             "lag/rolling features can be computed correctly before "
+             "pushing to the feature store. 0 = just the current reading.",
+    )
+    args = parser.parse_args()
 
-    # --- Current AQI (single point, always run) ---
+    if args.backfill:
+        print("=== Pulling historical AQI data (yearly chunks) ===")
+        historical_rows = fetch_historical_data(chunk_by_year=True)
+        save_many_to_csv(historical_rows)
+
+        print("\n=== Pulling historical weather data (yearly chunks) ===")
+        historical_weather = fetch_open_meteo_historical(chunk_by_year=True)
+        save_weather_to_csv(historical_weather)
+
+    elif args.hours_back > 0:
+        days_back = max(1, args.hours_back // 24 + 1)
+        print(f"=== Pulling last {args.hours_back}h (~{days_back} day(s)) of AQI + weather ===")
+        historical_rows = fetch_historical_data(days_back=days_back)
+        save_many_to_csv(historical_rows)
+
+        historical_weather = fetch_open_meteo_historical(days_back=days_back)
+        save_weather_to_csv(historical_weather)
+
     current_row = fetch_current_data()
     save_to_csv(current_row)
 
-    # --- 5-year yearly-chunked pull: weather ---
-    print("\n=== Pulling historical weather data (yearly chunks) ===")
-    historical_weather = fetch_open_meteo_historical(chunk_by_year=True)
-    save_weather_to_csv(historical_weather)
-
-    # --- Current weather (single point, always run) ---
     current_weather = fetch_current_weather()
     print("Current weather:", current_weather)
     save_current_weather_to_csv(current_weather)
