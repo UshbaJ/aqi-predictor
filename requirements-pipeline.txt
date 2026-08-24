@@ -16,3 +16,4 @@ pyasn1
 pyasn1-modules
 javaobj-py3
 pycryptodomex
+pyarrow==24.0.0
