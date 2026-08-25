@@ -32,7 +32,7 @@ RESULTS_PATH = "data/cv_validation_results.csv"
 N_SPLITS = 5
 
 os.makedirs(MODEL_DIR, exist_ok=True)
-
+os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
 
 def naive_baseline_scores(y_true, current_aqi):
     """Naive persistence baseline: predict AQI stays the same."""
