@@ -27,7 +27,7 @@ FEATURE_COLS = [
     "wind_speed_lag_1h", "wind_speed_lag_3h",
 ]
 
-HORIZONS = (24, 72)
+HORIZONS = (24, 48, 72)
 
 
 def load_and_merge(aqi_path=AQI_PATH, weather_path=WEATHER_PATH):
@@ -69,10 +69,19 @@ def engineer_features(df):
 
 
 def build_targets(df, horizons=HORIZONS):
-    """Add target_{h}h columns - AQI value h hours ahead."""
+    """
+    Add target_{h}h columns - mean AQI over the day-window ending at h hours ahead.
+    Windows are non-overlapping 24h blocks: target_24h = mean(aqi[t+1:t+24]),
+    target_48h = mean(aqi[t+25:t+48]), target_72h = mean(aqi[t+49:t+72]).
+
+    Note: ~31 multi-hour gaps in source data (API downtime) add extra nulls
+    beyond the pure trailing-edge count via rolling(24) invalidation -
+    expected, not a bug.
+    """
     df = df.copy()
     for h in horizons:
-        df[f"target_{h}h"] = df["aqi_epa"].shift(-h)
+        window_mean = df["aqi_epa"].rolling(window=24).mean()
+        df[f"target_{h}h"] = window_mean.shift(-h)
     return df
 
 
@@ -94,12 +103,13 @@ def build_full_dataset():
 def load_from_feature_store():
     """
     Attempt to read the engineered feature set back from the Hopsworks
-    Feature Store (aqi_weather_features, v1). This is the "real" feature
+    Feature Store (aqi_weather_features, v2). This is the "real" feature
     store path required by the project spec.
 
     Returns the raw feature-group DataFrame (already engineered - no need
     to re-run engineer_features/build_targets, since feature_pipeline.py
-    already wrote the fully-engineered columns including target_24h/72h).
+    already wrote the fully-engineered columns including
+    target_24h/target_48h/target_72h as day-average window targets).
 
     Raises whatever exception hsfs raises on failure - caller decides
     whether to fall back.
@@ -112,7 +122,7 @@ def load_from_feature_store():
     api_key = os.getenv("HOPSWORKS_API_KEY")
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
-    fg = fs.get_feature_group(name="aqi_weather_features", version=1)
+    fg = fs.get_feature_group(name="aqi_weather_features", version=2)
 
     # use_hive=True forces the older Spark/Hive read path. As of writing,
     # Hopsworks' newer ArrowFlight/DuckDB read service has a server-side bug

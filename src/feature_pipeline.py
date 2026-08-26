@@ -22,7 +22,7 @@ from features import build_full_dataset
 load_dotenv()
 
 FEATURE_GROUP_NAME = "aqi_weather_features"
-FEATURE_GROUP_VERSION = 1
+FEATURE_GROUP_VERSION = 2
 PRIMARY_KEY = ["datetime"]
 EVENT_TIME = "datetime"
 
@@ -98,6 +98,8 @@ def align_dtypes_to_schema(df, fg):
 
 
 def create_or_get_feature_group(fs):
+    """Hourly AQI + weather features for Bahawalpur, with lags/rolling stats 
+    and day-average targets (target_24h/48h/72h, non-overlapping 24h windows)"""
     """Create the feature group if it doesn't exist yet, or get the existing one."""
     fg = fs.get_or_create_feature_group(
         name=FEATURE_GROUP_NAME,
@@ -118,6 +120,21 @@ def main():
 
     fg = create_or_get_feature_group(fs)
     print(f"Feature group '{FEATURE_GROUP_NAME}' (v{FEATURE_GROUP_VERSION}) ready.")
+
+    # Register any new columns not yet in the feature group's schema
+    # (e.g. adding a new forecast horizon like target_48h later on).
+    # append_features() only adds columns that don't already exist -
+    # safe to call even when nothing new is present.
+    existing_cols = {f.name for f in fg.schema}
+    new_cols = [c for c in df.columns if c not in existing_cols]
+    if new_cols:
+        from hsfs.feature import Feature
+        new_features = [Feature(name=c, type="double") for c in new_cols]
+        print(f"Registering new columns in feature group schema: {new_cols}")
+        fg.append_features(new_features)
+        # Re-fetch so fg.schema reflects the newly added columns -
+        # the in-memory fg object may not update its schema in place.
+        fg = fs.get_feature_group(name=FEATURE_GROUP_NAME, version=FEATURE_GROUP_VERSION)
 
     df = align_dtypes_to_schema(df, fg)
     print("Aligned dataframe dtypes to feature group schema. Inserting data...")
