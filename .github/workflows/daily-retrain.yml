@@ -2,7 +2,7 @@ name: Daily Retraining
 
 # Runs once a day: reads the latest features from the Hopsworks Feature
 # Store (with local CSV fallback, per train.py's built-in logic) and
-# retrains Ridge + RF models for both horizons, saving CV metrics.
+# retrains Ridge + RF models for all three horizons, saving CV metrics.
 
 on:
   schedule:
