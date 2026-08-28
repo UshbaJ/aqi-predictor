@@ -5,4 +5,4 @@ venv/
 .venv/
 data/*.csv
 .ipynb_checkpoints/
-*.pkl
+rf_model_*.pkl
