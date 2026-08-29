@@ -214,7 +214,7 @@ def get_forecast():
 
 @st.cache_data(ttl=1800)
 def get_history(days=14):
-    df, source = load_features(source="hopsworks")
+    df, source = load_features(source="auto")
     df = df.sort_values("datetime")
     latest_row = df.dropna(subset=["aqi_epa"]).iloc[-1]
     cutoff = df["datetime"].max() - pd.Timedelta(days=days)
@@ -389,7 +389,6 @@ def main():
             history, latest_row, source = get_history(days=14)
         except Exception as e:
             st.error(f"Could not load current data: {e}")
-            st.exception(e)
             return
 
     current_aqi = latest_row["aqi_epa"]
@@ -431,7 +430,6 @@ def main():
             results, as_of, fsource = get_forecast()
         except Exception as e:
             st.error(f"Could not generate forecast: {e}")
-            st.exception(e)
             return
 
     st.markdown(
