@@ -118,8 +118,20 @@ def load_from_feature_store():
     import hopsworks
     from dotenv import load_dotenv
 
-    load_dotenv()
-    api_key = os.getenv("HOPSWORKS_API_KEY")
+    api_key = None
+    try:
+        import streamlit as st
+        api_key = st.secrets.get("HOPSWORKS_API_KEY")
+    except Exception:
+        pass
+
+    if not api_key:
+        load_dotenv()
+        api_key = os.getenv("HOPSWORKS_API_KEY")
+
+    if not api_key:
+        raise ValueError("HOPSWORKS_API_KEY not found in Streamlit secrets or .env file.")
+
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     fg = fs.get_feature_group(name="aqi_weather_features", version=2)
