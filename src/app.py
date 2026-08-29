@@ -214,7 +214,7 @@ def get_forecast():
 
 @st.cache_data(ttl=1800)
 def get_history(days=14):
-    df, source = load_features(source="auto")
+    df, source = load_features(source="hopsworks")
     df = df.sort_values("datetime")
     latest_row = df.dropna(subset=["aqi_epa"]).iloc[-1]
     cutoff = df["datetime"].max() - pd.Timedelta(days=days)
