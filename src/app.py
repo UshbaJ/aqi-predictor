@@ -389,6 +389,7 @@ def main():
             history, latest_row, source = get_history(days=14)
         except Exception as e:
             st.error(f"Could not load current data: {e}")
+            st.exception(e)
             return
 
     current_aqi = latest_row["aqi_epa"]
@@ -430,6 +431,7 @@ def main():
             results, as_of, fsource = get_forecast()
         except Exception as e:
             st.error(f"Could not generate forecast: {e}")
+            st.exception(e)
             return
 
     st.markdown(
@@ -450,7 +452,6 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # Bento layout: hero card for tomorrow, two stacked smaller cards for day 2/3
     hero_col, stack_col = st.columns([1.3, 1])
     with hero_col:
         cat, col_color, ic, _ = categorize_aqi(values[0])
