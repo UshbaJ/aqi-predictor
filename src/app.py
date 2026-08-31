@@ -14,9 +14,12 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import plotly.graph_objects as go
+import joblib
+import streamlit.components.v1 as components
 
 from predict import predict_next_3_days
 from features import load_features
+from features import FEATURE_COLS
 
 st.set_page_config(page_title="Bahawalpur AQI Forecast", page_icon="🌫️", layout="wide")
 
@@ -69,7 +72,8 @@ THEMES = {
         "muted": "#9aa5b1",
         "card_bg": "rgba(255,255,255,0.06)",
         "card_border": "rgba(255,255,255,0.12)",
-        "blob_colors": ["#8a7a6655", "#5c4a3344", "#a89f8f55"],
+        "sky_gradient": "linear-gradient(180deg, #1a1a3d 0%, #3d2b56 35%, #7d4a5c 65%, #d4713f 100%)",
+        "sun_glow": "radial-gradient(circle at 85% 15%, #ffd54f88 0%, #ff8a6544 30%, transparent 60%)",
     },
     "light": {
         "bg": "#f4f6fb",
@@ -77,7 +81,8 @@ THEMES = {
         "muted": "#5c6773",
         "card_bg": "rgba(255,255,255,0.55)",
         "card_border": "rgba(0,0,0,0.08)",
-        "blob_colors": ["#d4c4a866", "#b8a68844", "#e8dcc866"],
+        "sky_gradient": "linear-gradient(180deg, #4a90d9 0%, #7ec3e8 40%, #bde3f4 75%, #eaf6fb 100%)",
+        "sun_glow": "radial-gradient(circle at 85% 12%, #fff6c4 0%, #ffe17d99 25%, transparent 55%)",
     },
 }
 
@@ -89,21 +94,17 @@ def get_theme():
 
 
 def inject_css(theme):
-    blob1, blob2, blob3 = theme["blob_colors"]
     st.markdown(
         f"""
         <style>
         .stApp {{
-            background-color: {theme['bg']};
-            background-image:
-                radial-gradient(circle at 15% 20%, {blob1} 0%, transparent 45%),
-                radial-gradient(circle at 85% 10%, {blob2} 0%, transparent 40%),
-                radial-gradient(circle at 50% 90%, {blob3} 0%, transparent 50%);
+            background: {theme['sky_gradient']};
+            background-image: {theme['sun_glow']}, {theme['sky_gradient']};
             background-attachment: fixed;
             color: {theme['text']};
         }}
         h1, h2, h3, h4, p, span, div {{ color: {theme['text']}; }}
-
+    
         .header-banner {{
             background: linear-gradient(135deg, #1e3c72cc 0%, #2a5298cc 100%);
             backdrop-filter: blur(12px);
@@ -355,6 +356,126 @@ def render_shap_chart(importance_df, theme):
     )
     st.altair_chart(chart, use_container_width=True)
 
+def render_whatif_simulator(theme):
+    st.divider()
+    st.subheader("🧪 What-If Simulator")
+    st.caption("Adjust conditions below and see how the model's forecast changes in real time.")
+
+    horizon = st.radio(
+        "Forecast horizon", [24, 48, 72],
+        format_func=lambda h: f"+{h//24} day{'s' if h > 24 else ''}",
+        horizontal=True, key="whatif_horizon",
+    )
+
+    try:
+        history, latest_row, _ = get_history(days=14)
+    except Exception:
+        st.warning("Could not load baseline conditions for simulation.")
+        return
+
+    model = joblib.load(f"src/ridge_model_{horizon}h.pkl")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        temp = st.slider("Temperature (°C)", 0.0, 50.0, float(latest_row["temp"]), 0.5)
+        humidity = st.slider("Humidity (%)", 0, 100, int(latest_row["humidity"]), 1)
+        pressure = st.slider("Pressure (hPa)", 950.0, 1050.0, float(latest_row["pressure"]), 0.5)
+    with col2:
+        wind_speed = st.slider("Wind Speed (m/s)", 0.0, 30.0, float(latest_row["wind_speed"]), 0.5)
+        current_aqi = st.slider("Current AQI", 0, 300, int(latest_row["aqi_epa"]), 1)
+
+    sim_row = latest_row.copy()
+    sim_row["temp"] = temp
+    sim_row["humidity"] = humidity
+    sim_row["pressure"] = pressure
+    sim_row["wind_speed"] = wind_speed
+    sim_row["aqi_epa"] = current_aqi
+
+    X_sim = pd.DataFrame([sim_row[FEATURE_COLS]])
+    predicted = model.predict(X_sim)[0]
+
+    category, color, icon, advisory = categorize_aqi(predicted)
+
+    st.write("")
+    st.markdown(
+        f"""
+        <div class="forecast-card hero" style="background: linear-gradient(160deg, {color}ee, {color}99); max-width: 400px;">
+            <div class="day-label">Simulated +{horizon//24}-day AQI</div>
+            <div class="aqi-value">{icon} {predicted:.0f}</div>
+            <div class="category">{category}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(advisory)
+
+def render_voice_briefing(results, day_labels, current_aqi, category):
+    briefing_text = f"Current air quality is {category}, with an AQI of {current_aqi:.0f}. "
+    for label, aqi in zip(day_labels, results.values()):
+        cat, _, _, _ = categorize_aqi(aqi)
+        clean_label = label.split("·")[-1].strip() if "·" in label else label
+        briefing_text += f"Forecast for {clean_label}: {aqi:.0f}, {cat}. "
+
+    escaped_text = briefing_text.replace('"', '\\"')
+    components.html(
+        f"""
+        <button onclick="speakBriefing()" style="
+            background: linear-gradient(135deg, #4fc3f7, #2a5298);
+            color: white; border: none; padding: 10px 20px;
+            border-radius: 10px; font-size: 15px; cursor: pointer; margin-right: 8px;">
+            🔊 Play Voice Briefing
+        </button>
+        <button onclick="stopBriefing()" style="
+            background: rgba(255,255,255,0.1);
+            color: white; border: 1px solid rgba(255,255,255,0.3); padding: 10px 20px;
+            border-radius: 10px; font-size: 15px; cursor: pointer;">
+            ⏹ Stop
+        </button>
+        <script>
+        function speakBriefing() {{
+            window.speechSynthesis.cancel();
+            var msg = new SpeechSynthesisUtterance("{escaped_text}");
+            msg.rate = 0.95;
+            window.speechSynthesis.speak(msg);
+        }}
+        function stopBriefing() {{
+            window.speechSynthesis.cancel();
+        }}
+        </script>
+        """,
+        height=60,
+    )
+  
+def render_exposure_calculator(current_aqi, theme):
+    st.divider()
+    st.subheader("🫁 Personal Exposure Calculator")
+    st.caption("Estimate your health risk based on planned time outdoors today.")
+
+    hours = st.slider("Hours spent outdoors today", 0.0, 12.0, 1.0, 0.5)
+    activity = st.selectbox("Activity level", ["Light (walking)", "Moderate (jogging)", "Vigorous (sports/exercise)"])
+
+    activity_multiplier = {"Light (walking)": 1.0, "Moderate (jogging)": 1.5, "Vigorous (sports/exercise)": 2.2}[activity]
+    exposure_score = current_aqi * hours * activity_multiplier / 24
+
+    if exposure_score < 20:
+        risk, risk_color, risk_advice = "Low", "#00c853", "Minimal risk — enjoy your outdoor time."
+    elif exposure_score < 50:
+        risk, risk_color, risk_advice = "Moderate", "#ffd600", "Consider shorter sessions if you have respiratory sensitivity."
+    elif exposure_score < 100:
+        risk, risk_color, risk_advice = "High", "#ff9100", "Reduce duration or intensity; wear a mask if possible."
+    else:
+        risk, risk_color, risk_advice = "Very High", "#ff3d00", "Postpone outdoor activity if possible today."
+
+    st.markdown(
+        f"""
+        <div class="glass-card" style="border-left: 5px solid {risk_color}; text-align:left; padding:16px 20px;">
+            <div style="font-size:14px; color:{theme['muted']};">Estimated Exposure Risk</div>
+            <div style="font-size:26px; font-weight:800; color:{risk_color};">{risk}</div>
+            <div style="font-size:14px; margin-top:6px;">{risk_advice}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def main():
     theme = get_theme()
@@ -461,8 +582,15 @@ def main():
             st.write("")
 
     st.write("")
-    st.divider()
 
+    st.write("")
+    render_whatif_simulator(theme)
+    render_voice_briefing(results, day_labels, current_aqi, category)
+    render_exposure_calculator(current_aqi, theme)
+
+    st.write("")
+    st.divider()
+    
     st.subheader("📈 Recent AQI Trend")
     render_trend_chart(history, theme)
 
