@@ -89,7 +89,7 @@ THEMES = {
 
 def get_theme():
     if "theme" not in st.session_state:
-        st.session_state.theme = "dark"
+        st.session_state.theme = "light"
     return THEMES[st.session_state.theme]
 
 
