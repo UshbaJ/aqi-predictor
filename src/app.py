@@ -259,11 +259,17 @@ def render_info_card(label, value):
     )
 
 
-def render_forecast_card(label, aqi_value, category, color, icon, delta=None, hero=False):
+def render_forecast_card(label, aqi_value, category, color, icon, delta=None, hero=False, rmse=None):
     delta_html = ""
     if delta is not None:
         arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "―")
         delta_html = f'<div style="font-size:12px; color:rgba(255,255,255,0.8); margin-top:6px;">{arrow} {abs(delta):.0f} vs prior day</div>'
+
+    range_html = ""
+    if rmse is not None:
+        low, high = aqi_value - rmse, aqi_value + rmse
+        range_html = f'<div style="font-size:12px; color:rgba(255,255,255,0.75); margin-top:4px;">Range: {low:.0f}–{high:.0f}</div>'
+
     hero_class = " hero" if hero else ""
     st.markdown(
         f"""
@@ -271,6 +277,7 @@ def render_forecast_card(label, aqi_value, category, color, icon, delta=None, he
             <div class="day-label">{label}</div>
             <div class="aqi-value">{icon} {aqi_value:.0f}</div>
             <div class="category">{category}</div>
+            {range_html}
             {delta_html}
         </div>
         """,
@@ -355,6 +362,44 @@ def render_shap_chart(importance_df, theme):
         .configure_view(strokeWidth=0, fill=theme["bg"])
     )
     st.altair_chart(chart, use_container_width=True)
+
+def render_model_story(theme):
+    st.divider()
+    with st.expander("📖 How this model was built"):
+        story_points = [
+            ("🎯", "The redesign", "#4fc3f7",
+             "Targets were originally point-in-time AQI values at +24h/+48h/+72h. "
+             "After confirming with mentors that day-average forecasts were the correct spec, "
+             "all three targets were redefined as non-overlapping 24-hour window averages."),
+            ("📊", "Model selection", "#00c853",
+             "Ridge regression outperformed both a naive persistence baseline and Random Forest "
+             "at every horizon during 5-fold time-series cross-validation — beating naive by "
+             "18.4% (24h), 18.9% (48h), and 20.5% (72h) on mean RMSE."),
+            ("🔗", "A collinearity finding", "#ff9100",
+             "Temperature and pressure are strongly negatively correlated (r = -0.80) in this "
+             "dataset. This explains why SHAP (on Ridge) and Random Forest's built-in importance "
+             "disagree on which feature ranks higher at longer horizons — both are largely "
+             "encoding the same underlying weather-system signal."),
+            ("✅", "Validation", "#9c27b0",
+             "All reported metrics come from a genuine 90-day holdout — the deployed model was "
+             "trained excluding this window entirely, so results reflect real forecasting "
+             "performance, not the model recalling data it was trained on."),
+        ]
+
+        for icon, label, accent, text in story_points:
+            st.markdown(
+                f"""
+                <div class="glass-card" style="border-left: 4px solid {accent}; text-align:left; padding:14px 18px; margin-bottom:12px;">
+                    <div style="font-size:15px; font-weight:700; color:{theme['text']}; margin-bottom:4px;">
+                        {icon} {label}
+                    </div>
+                    <div style="font-size:13.5px; line-height:1.5; color:{theme['muted']};">
+                        {text}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 def render_whatif_simulator(theme):
     st.divider()
@@ -505,6 +550,8 @@ def main():
         unsafe_allow_html=True,
     )
 
+    render_model_story(theme)
+    
     with st.spinner("Loading live data..."):
         try:
             history, latest_row, source = get_history(days=14)
@@ -571,14 +618,22 @@ def main():
             unsafe_allow_html=True,
         )
 
+    horizon_rmse = {}
+    for h in [24, 48, 72]:
+        try:
+            _, rmse = get_holdout(h)
+            horizon_rmse[h] = rmse
+        except FileNotFoundError:
+            horizon_rmse[h] = None
+
     hero_col, stack_col = st.columns([1.3, 1])
     with hero_col:
         cat, col_color, ic, _ = categorize_aqi(values[0])
-        render_forecast_card(day_labels[0], values[0], cat, col_color, ic, deltas[0], hero=True)
+        render_forecast_card(day_labels[0], values[0], cat, col_color, ic, deltas[0], hero=True, rmse=horizon_rmse[24])
     with stack_col:
-        for i in [1, 2]:
+        for i, h in zip([1, 2], [48, 72]):
             cat, col_color, ic, _ = categorize_aqi(values[i])
-            render_forecast_card(day_labels[i], values[i], cat, col_color, ic, deltas[i])
+            render_forecast_card(day_labels[i], values[i], cat, col_color, ic, deltas[i], rmse=horizon_rmse[h])
             st.write("")
 
     st.write("")
