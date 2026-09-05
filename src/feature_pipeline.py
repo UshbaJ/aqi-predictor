@@ -2,29 +2,32 @@
 feature_pipeline.py
 
 Connects to Hopsworks Feature Store and pushes engineered features
-(from features.py) into a versioned Feature Group.
-
-This is the bridge between local development (CSV -> pandas) and the
-"real" feature store setup your project spec requires. After this runs
-successfully once, train.py can be updated to read from Hopsworks
-instead of recomputing from local CSVs every time.
+(from features.py) into a versioned Feature Group, per city.
 
 Usage:
-    python src/feature_pipeline.py
+    python src/feature_pipeline.py --city bahawalpur
+    python src/feature_pipeline.py --city lahore
+    python src/feature_pipeline.py --city islamabad
 """
 
 import os
+import argparse
 import hopsworks
 from dotenv import load_dotenv
 
-from features import build_full_dataset
+from features import build_full_dataset, CITIES
 
 load_dotenv()
 
-FEATURE_GROUP_NAME = "aqi_weather_features"
 FEATURE_GROUP_VERSION = 2
 PRIMARY_KEY = ["datetime"]
 EVENT_TIME = "datetime"
+
+
+def feature_group_name(city):
+    """Same naming convention as features.py's load_from_feature_store():
+    bahawalpur keeps the original unsuffixed name, other cities get suffixed."""
+    return "aqi_weather_features" if city == "bahawalpur" else f"aqi_weather_features_{city}"
 
 
 def connect():
@@ -39,29 +42,23 @@ def connect():
     return fs
 
 
-def prepare_dataframe():
+def prepare_dataframe(city):
     """
-    Build the full engineered dataset from features.py.
+    Build the full engineered dataset for one city from features.py.
     Hopsworks needs clean column names and consistent dtypes, and
     doesn't accept NaN in primary key / event time columns, so we
     keep NaNs in feature columns (they get dropped per-horizon later
     during training) but ensure datetime is clean.
     """
-    df = build_full_dataset()
+    df = build_full_dataset(city=city)
     df = df.dropna(subset=["datetime"]).reset_index(drop=True)
 
     # Hopsworks feature/column names must be lowercase, no special chars.
-    # Our columns are already lowercase snake_case, so no renaming needed -
-    # but double check nothing slipped through with capitals or dots.
     df.columns = [c.lower().replace(".", "_") for c in df.columns]
 
     return df
 
 
-# Maps Hopsworks/Hudi column types (as reported by fg.schema) to the pandas
-# dtype we should cast to before inserting, so a batch's dtype always
-# matches the schema locked in on first upload - regardless of whether
-# this particular batch happens to contain NaN in a given column.
 HOPSWORKS_TO_PANDAS_DTYPE = {
     "bigint": "int64",
     "int": "int32",
@@ -76,10 +73,6 @@ def align_dtypes_to_schema(df, fg):
     Cast each column in df to match the feature group's already-established
     schema (fg.schema), so incremental inserts of any size don't fail with
     a type mismatch depending on whether NaN happened to be present.
-    Columns with NaN can't be cast to a non-nullable int type - those are
-    left as float (NaN-safe); if Hopsworks still rejects them, that
-    reflects a genuine data issue worth investigating rather than
-    something to silently paper over.
     """
     df = df.copy()
     schema_types = {f.name: f.type for f in fg.schema}
@@ -88,7 +81,7 @@ def align_dtypes_to_schema(df, fg):
         hw_type = schema_types.get(col)
         target_dtype = HOPSWORKS_TO_PANDAS_DTYPE.get(hw_type)
         if target_dtype is None:
-            continue  # string/timestamp/unknown - leave as-is
+            continue
         if target_dtype.startswith("int") and df[col].isna().any():
             df[col] = df[col].astype("float64")
         else:
@@ -97,50 +90,60 @@ def align_dtypes_to_schema(df, fg):
     return df
 
 
-def create_or_get_feature_group(fs):
-    """Hourly AQI + weather features for Bahawalpur, with lags/rolling stats 
-    and day-average targets (target_24h/48h/72h, non-overlapping 24h windows)"""
-    """Create the feature group if it doesn't exist yet, or get the existing one."""
+def create_or_get_feature_group(fs, city):
+    """Create the feature group for this city if it doesn't exist yet, or get the existing one."""
+    fg_name = feature_group_name(city)
     fg = fs.get_or_create_feature_group(
-        name=FEATURE_GROUP_NAME,
+        name=fg_name,
         version=FEATURE_GROUP_VERSION,
-        description="Hourly AQI + weather features for Bahawalpur, with lags/rolling stats and 24h/72h targets",
+        description=f"Hourly AQI + weather features for {city.title()}, "
+                     f"with lags/rolling stats and 24h/48h/72h day-average targets",
         primary_key=PRIMARY_KEY,
         event_time=EVENT_TIME,
-        online_enabled=False,  # offline-only is fine for this project; no real-time serving needed
-        time_travel_format="HUDI",  # explicit - avoids ambiguous DELTA auto-detection failing on missing deltalake lib
+        online_enabled=False,
+        time_travel_format="HUDI",
     )
     return fg
 
 
-def main():
+def run_for_city(city):
     fs = connect()
-    df = prepare_dataframe()
-    print(f"Prepared {len(df)} rows, {len(df.columns)} columns for upload.")
+    df = prepare_dataframe(city)
+    print(f"[{city}] Prepared {len(df)} rows, {len(df.columns)} columns for upload.")
 
-    fg = create_or_get_feature_group(fs)
-    print(f"Feature group '{FEATURE_GROUP_NAME}' (v{FEATURE_GROUP_VERSION}) ready.")
-
-    # Register any new columns not yet in the feature group's schema
-    # (e.g. adding a new forecast horizon like target_48h later on).
-    # append_features() only adds columns that don't already exist -
-    # safe to call even when nothing new is present.
-    existing_cols = {f.name for f in fg.schema}
-    new_cols = [c for c in df.columns if c not in existing_cols]
-    if new_cols:
-        from hsfs.feature import Feature
-        new_features = [Feature(name=c, type="double") for c in new_cols]
-        print(f"Registering new columns in feature group schema: {new_cols}")
-        fg.append_features(new_features)
-        # Re-fetch so fg.schema reflects the newly added columns -
-        # the in-memory fg object may not update its schema in place.
-        fg = fs.get_feature_group(name=FEATURE_GROUP_NAME, version=FEATURE_GROUP_VERSION)
+    fg = create_or_get_feature_group(fs, city)
+    fg_name = feature_group_name(city)
+    print(f"[{city}] Feature group '{fg_name}' (v{FEATURE_GROUP_VERSION}) ready.")
+    if fg.schema:  # only true for a feature group that already has data/columns established
+        existing_cols = {f.name for f in fg.schema}
+        new_cols = [c for c in df.columns if c not in existing_cols]
+        if new_cols:
+            from hsfs.feature import Feature
+            new_features = [Feature(name=c, type="double") for c in new_cols]
+            print(f"[{city}] Registering new columns in feature group schema: {new_cols}")
+            fg.append_features(new_features)
+            fg = fs.get_feature_group(name=fg_name, version=FEATURE_GROUP_VERSION)
+    else:
+        print(f"[{city}] New feature group with no existing schema — "
+              f"skipping column registration; first insert will establish the schema.")
 
     df = align_dtypes_to_schema(df, fg)
-    print("Aligned dataframe dtypes to feature group schema. Inserting data...")
+    print(f"[{city}] Aligned dataframe dtypes to feature group schema. Inserting data...")
 
     fg.insert(df)
-    print("Insert complete. Check the Hopsworks UI (Feature Store) to confirm the data landed.")
+    print(f"[{city}] Insert complete. Check the Hopsworks UI (Feature Store) to confirm the data landed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Push engineered features to Hopsworks Feature Store")
+    parser.add_argument(
+        "--city",
+        choices=CITIES,
+        required=True,
+        help="Which city's feature group to create/update.",
+    )
+    args = parser.parse_args()
+    run_for_city(args.city)
 
 
 if __name__ == "__main__":
