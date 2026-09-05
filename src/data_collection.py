@@ -9,7 +9,16 @@ import argparse
 load_dotenv()
 API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-LAT, LON = 29.3956, 71.6836  # Bahawalpur
+CITIES = {
+    "bahawalpur": (29.3956, 71.6836),
+    "lahore": (31.5497, 74.3436),
+    "islamabad": (33.6844, 73.0479),
+}
+
+# Set at runtime in __main__ based on --city; module-level default keeps
+# existing function signatures (which read LAT/LON as globals) working.
+LAT, LON = CITIES["bahawalpur"]
+CITY = "bahawalpur"
 
 # OpenWeather's Air Pollution History API only goes back to 2020-11-27
 EARLIEST_AQI_DATE = datetime(2020, 11, 27)
@@ -130,8 +139,8 @@ def fetch_historical_data(days_back=30, chunk_by_year=False):
 
     return all_rows
 
-
-def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
+def save_to_csv(row, filepath=None):
+    filepath = filepath or f"data/{CITY}/raw_aqi_data.csv"
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     df_new = pd.DataFrame([row])
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
@@ -147,7 +156,8 @@ def save_to_csv(row, filepath="data/raw_aqi_data.csv"):
     print(f"Saved row: {row}")
 
 
-def save_many_to_csv(rows, filepath="data/raw_aqi_data.csv"):
+def save_many_to_csv(rows, filepath=None):
+    filepath = filepath or f"data/{CITY}/raw_aqi_data.csv"
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     if not rows:
         print("No AQI rows to save.")
@@ -249,7 +259,8 @@ def fetch_open_meteo_historical(days_back=30, chunk_by_year=False):
     return all_rows
 
 
-def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
+def save_weather_to_csv(rows, filepath=None):
+    filepath = filepath or f"data/{CITY}/raw_weather_data.csv"
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     if not rows:
         print("No weather rows to save.")
@@ -268,7 +279,8 @@ def save_weather_to_csv(rows, filepath="data/raw_weather_data.csv"):
     print(f"Saved {len(rows)} weather rows. Total in file: {len(df_combined)}")
 
 
-def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
+def save_current_weather_to_csv(row, filepath=None):
+    filepath = filepath or f"data/{CITY}/raw_weather_data.csv"
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     df_new = pd.DataFrame([row])
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.floor("h")
@@ -291,6 +303,12 @@ def save_current_weather_to_csv(row, filepath="data/raw_weather_data.csv"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AQI + weather data collection")
     parser.add_argument(
+        "--city",
+        choices=list(CITIES.keys()),
+        default="bahawalpur",
+        help="Which city to collect data for.",
+    )
+    parser.add_argument(
         "--backfill",
         action="store_true",
         help="Run the full 5-year yearly-chunked historical pull instead of "
@@ -307,18 +325,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    CITY = args.city
+    LAT, LON = CITIES[CITY]
+
     if args.backfill:
-        print("=== Pulling historical AQI data (yearly chunks) ===")
+        print(f"=== Pulling historical AQI data for {CITY} (yearly chunks) ===")
         historical_rows = fetch_historical_data(chunk_by_year=True)
         save_many_to_csv(historical_rows)
 
-        print("\n=== Pulling historical weather data (yearly chunks) ===")
+        print(f"\n=== Pulling historical weather data for {CITY} (yearly chunks) ===")
         historical_weather = fetch_open_meteo_historical(chunk_by_year=True)
         save_weather_to_csv(historical_weather)
 
     elif args.hours_back > 0:
         days_back = max(1, args.hours_back // 24 + 1)
-        print(f"=== Pulling last {args.hours_back}h (~{days_back} day(s)) of AQI + weather ===")
+        print(f"=== Pulling last {args.hours_back}h (~{days_back} day(s)) of AQI + weather for {CITY} ===")
         historical_rows = fetch_historical_data(days_back=days_back)
         save_many_to_csv(historical_rows)
 

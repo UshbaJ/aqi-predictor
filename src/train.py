@@ -25,7 +25,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-from features import load_features, get_clean_dataset_for_horizon, FEATURE_COLS, HORIZONS
+from features import FeatureLoadError, load_features, get_clean_dataset_for_horizon, FEATURE_COLS, HORIZONS
 
 MODEL_DIR = "src"
 RESULTS_PATH = "data/cv_validation_results.csv"
@@ -159,7 +159,13 @@ def train_final_models(clean_df, target_col, horizon):
 
 def main():
     print("Loading features (Hopsworks Feature Store, falling back to local CSVs)...")
-    full_df, source = load_features(source="auto")
+    try:
+        full_df, source = load_features(source="auto")
+    except FeatureLoadError as e:
+        print(f"WARNING: {e}")
+        print("Skipping retraining for this run — keeping existing model.")
+        exit(0)  # exit cleanly, don't fail the workflow
+
     print(f"Using features from: {source}\n")
 
     all_summaries = []
@@ -188,3 +194,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
