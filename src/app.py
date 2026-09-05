@@ -5,7 +5,8 @@ Streamlit dashboard for the AQI Predictor: current conditions, live AQI
 gauge, pollutant breakdown, 3-day forecast, historical trend, model
 validation, SHAP explanations, hazardous AQI alerts, a what-if simulator,
 voice briefing, and a personal exposure calculator.
-Supports user-toggleable light/dark theme.
+Supports a city selector (Bahawalpur, Lahore, Islamabad) and
+user-toggleable light/dark theme.
 
 Usage:
     streamlit run src/app.py
@@ -19,9 +20,12 @@ import joblib
 import streamlit.components.v1 as components
 
 from predict import predict_next_3_days
-from features import load_features, FEATURE_COLS
+from features import load_features, FEATURE_COLS, CITIES
+from train import model_filename
+from validate_holdout import holdout_output_path
+from compute_shap import shap_output_path
 
-st.set_page_config(page_title="Bahawalpur AQI Forecast", page_icon="AQ", layout="wide")
+st.set_page_config(page_title="AQI Forecast", page_icon="AQ", layout="wide")
 
 AQI_CATEGORIES = [
     (50, "Good", "#16a34a", "Air quality is satisfactory."),
@@ -211,13 +215,13 @@ def check_hazard_alert(results, day_labels):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_forecast():
-    return predict_next_3_days()
+def get_forecast(city):
+    return predict_next_3_days(city=city)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_history(days=14):
-    df, source = load_features(source="auto")
+def get_history(city, days=14):
+    df, source = load_features(city=city, source="auto")
     df = df.sort_values("datetime")
     latest_row = df.dropna(subset=["aqi_epa"]).iloc[-1]
     cutoff = df["datetime"].max() - pd.Timedelta(days=days)
@@ -226,16 +230,16 @@ def get_history(days=14):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_holdout(horizon):
-    path = f"data/holdout_{horizon}h.csv"
+def get_holdout(city, horizon):
+    path = holdout_output_path(city, horizon)
     df = pd.read_csv(path, parse_dates=["datetime"])
     rmse = float(((df["actual"] - df["predicted"]) ** 2).mean() ** 0.5)
     return df, rmse
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_shap_importance(horizon):
-    return pd.read_csv(f"data/shap_importance_{horizon}h.csv")
+def get_shap_importance(city, horizon):
+    return pd.read_csv(shap_output_path(city, horizon))
 
 
 def render_gauge(aqi_value, color, theme):
@@ -364,8 +368,7 @@ def render_model_story():
         24-hour window averages.
 
         **Model selection:** Ridge regression outperformed both a naive persistence baseline and
-        Random Forest at every horizon during 5-fold time-series cross-validation, beating naive
-        by 18.4% (24h), 18.9% (48h), and 20.5% (72h) on mean RMSE.
+        Random Forest at every horizon during 5-fold time-series cross-validation.
 
         **A collinearity finding:** Temperature and pressure are strongly negatively correlated
         (r = -0.80) in this dataset. This explains why SHAP (on Ridge) and Random Forest's built-in
@@ -378,7 +381,7 @@ def render_model_story():
         """)
 
 
-def render_whatif_simulator(theme):
+def render_whatif_simulator(theme, city):
     st.divider()
     st.subheader("What-If Simulator")
     st.caption("Adjust conditions below and see how the model's forecast changes in real time.")
@@ -390,12 +393,12 @@ def render_whatif_simulator(theme):
     )
 
     try:
-        _, latest_row, _ = get_history(days=14)
+        _, latest_row, _ = get_history(city, days=14)
     except Exception:
         st.warning("Could not load baseline conditions for simulation.")
         return
 
-    model = joblib.load(f"src/ridge_model_{horizon}h.pkl")
+    model = joblib.load(model_filename(city, "ridge", horizon))
 
     col1, col2 = st.columns(2)
     with col1:
@@ -504,10 +507,17 @@ def main():
     theme = get_theme()
     inject_css(theme)
 
+    city = st.selectbox(
+        "City",
+        CITIES,
+        format_func=lambda c: c.title(),
+        key="selected_city",
+    )
+
     st.markdown(
-        """
+        f"""
         <div class="header-banner">
-            <h1>Bahawalpur AQI Forecast</h1>
+            <h1>{city.title()} AQI Forecast</h1>
             <p>Live conditions and 3-day-ahead average AQI forecast, powered by Ridge regression on hourly AQI and weather features.</p>
         </div>
         """,
@@ -518,7 +528,7 @@ def main():
 
     with st.spinner("Loading live data..."):
         try:
-            history, latest_row, source = get_history(days=14)
+            history, latest_row, source = get_history(city, days=14)
         except Exception as e:
             st.error(f"Could not load current data: {e}")
             return
@@ -559,7 +569,7 @@ def main():
     st.subheader("3-Day Forecast")
     with st.spinner("Loading forecast..."):
         try:
-            results, as_of, fsource = get_forecast()
+            results, as_of, fsource = get_forecast(city)
         except Exception as e:
             st.error(f"Could not generate forecast: {e}")
             return
@@ -577,7 +587,7 @@ def main():
     horizon_rmse = {}
     for h in horizons_list:
         try:
-            _, rmse = get_holdout(h)
+            _, rmse = get_holdout(city, h)
             horizon_rmse[h] = rmse
         except FileNotFoundError:
             horizon_rmse[h] = None
@@ -602,7 +612,7 @@ def main():
             st.write("")
 
     st.write("")
-    render_whatif_simulator(theme)
+    render_whatif_simulator(theme, city)
     st.divider()
     st.subheader("Voice Briefing")
     render_voice_briefing(results, day_labels, current_aqi, category)
@@ -619,21 +629,21 @@ def main():
     st.caption("Genuine holdout: Ridge trained excluding this window entirely, so this reflects real forecasting performance, not recall.")
     horizon_choice = st.radio("Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="holdout_horizon")
     try:
-        holdout_df, holdout_rmse = get_holdout(horizon_choice)
+        holdout_df, holdout_rmse = get_holdout(city, horizon_choice)
         st.write(f"Holdout RMSE: **\u00b1{holdout_rmse:.2f}**")
         render_holdout_chart(holdout_df, theme)
     except FileNotFoundError:
-        st.warning("Holdout results not found - run `python src/validate_holdout.py` first.")
+        st.warning(f"Holdout results not found for {city.title()} - run `python src/validate_holdout.py --city {city}` first.")
 
     st.divider()
     st.subheader("Why This Prediction")
     st.caption("Top features driving the forecast, by mean SHAP value.")
     shap_horizon = st.radio("SHAP Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="shap_horizon")
     try:
-        importance_df = get_shap_importance(shap_horizon)
+        importance_df = get_shap_importance(city, shap_horizon)
         render_shap_chart(importance_df, theme)
     except FileNotFoundError:
-        st.warning("SHAP results not found - run `python src/compute_shap.py` first.")
+        st.warning(f"SHAP results not found for {city.title()} - run `python src/compute_shap.py --city {city}` first.")
 
     st.write("")
     if st.button("Refresh"):
