@@ -1,8 +1,9 @@
 name: Hourly Feature Pipeline
 
-# Runs every hour: pulls the latest AQI + weather reading and pushes it
-# into the Hopsworks Feature Store. Keeps the feature store current
-# without needing to run data_collection.py manually.
+# Runs every hour: pulls the latest AQI + weather reading for each city
+# and pushes it into that city's Hopsworks Feature Store. Keeps all
+# three feature stores current without needing to run data_collection.py
+# manually.
 
 on:
   schedule:
@@ -13,6 +14,10 @@ jobs:
   update-features:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false      # one city's failure shouldn't cancel the others
+      matrix:
+        city: [bahawalpur, lahore, islamabad]
 
     steps:
       - name: Check out repository
@@ -31,9 +36,9 @@ jobs:
       - name: Pull recent AQI + weather history (enough for lag features)
         env:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-        run: python src/data_collection.py --hours-back 48
+        run: python src/data_collection.py --city ${{ matrix.city }} --hours-back 48
 
       - name: Push updated features to Hopsworks
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-        run: python src/feature_pipeline.py
+        run: python src/feature_pipeline.py --city ${{ matrix.city }}
