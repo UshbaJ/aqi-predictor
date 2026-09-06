@@ -349,7 +349,7 @@ POLLUTANT_COLS = ["aqi_epa", "co", "no2", "o3", "so2", "pm2_5", "pm10"]
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_raw_aqi_data(city):
-    df = pd.read_csv(f"data/{city}/raw_aqi_data.csv", parse_dates=["datetime"])
+    df, _ = load_features(city=city, source="auto")
     df = df.sort_values("datetime").reset_index(drop=True)
     return df
 
