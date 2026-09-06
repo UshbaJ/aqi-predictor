@@ -18,10 +18,12 @@ import altair as alt
 import plotly.graph_objects as go
 import joblib
 import streamlit.components.v1 as components
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from predict import predict_next_3_days
 from features import load_features, FEATURE_COLS, CITIES
-from train import model_filename
+from train import model_filename, results_path_for_city
 from validate_holdout import holdout_output_path
 from compute_shap import shap_output_path
 
@@ -101,6 +103,9 @@ def inject_css(theme):
     st.markdown(
         f"""
         <style>
+            :root {{
+            color-scheme: light !important;
+        }}
         .stApp {{
             background: {theme['sky_gradient']};
             background-image: {theme['sun_glow']}, {theme['sky_gradient']};
@@ -165,18 +170,50 @@ def inject_css(theme):
         }}
         .meta-line {{ color: {theme['muted']}; font-size: 12px; margin-bottom: 16px; }}
 
-        .hazard-alert {{
-            border-left: 3px solid #dc2626;
+        .hazard-alert-v2 {{
+            border-left: 4px solid #dc2626;
             background: {theme['card_bg']};
             backdrop-filter: blur(10px);
             border: 1px solid {theme['card_border']};
-            padding: 12px 16px;
-            border-radius: 6px;
-            color: {theme['text']};
-            font-size: 13px;
-            margin-bottom: 16px;
+            border-left: 4px solid #dc2626;
+            padding: 16px 18px;
+            border-radius: 8px;
+            margin-bottom: 20px;
         }}
+        .hazard-alert-v2 .alert-title {{
+            font-size: 15px; font-weight: 700; color: #dc2626;
+            display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+        }}
+        .hazard-chip-row {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+        .hazard-chip {{
+            background: rgba(220,38,38,0.12);
+            border: 1px solid rgba(220,38,38,0.3);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            color: {theme['text']};
+        }}
+        .hazard-chip b {{ color: #dc2626; }}
+        .hazard-footer {{ font-size: 12.5px; color: {theme['muted']}; margin-top: 10px; }}
 
+        button[data-baseweb="tab"] {{
+            font-size: 15px !important;
+            font-weight: 600 !important;
+            padding: 10px 20px !important;
+            color: {theme['muted']} !important;
+        }}
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            color: {theme['accent']} !important;
+        }}
+        div[data-baseweb="tab-list"] {{
+            gap: 4px;
+            border-bottom: 2px solid {theme['card_border']} !important;
+        }}
+        div[data-baseweb="tab-highlight"] {{
+            background-color: {theme['accent']} !important;
+            height: 3px !important;
+        }}
+        
         div[data-testid="stRadio"] label {{ color: {theme['text']} !important; font-size: 14px; }}
         div[data-testid="stRadio"] > div {{
             background-color: transparent !important;
@@ -191,6 +228,25 @@ def inject_css(theme):
             border: 1px solid {theme['card_border']} !important;
             border-radius: 6px !important;
             font-weight: 500 !important;
+        }}
+        
+                .react-aria-ComboBox input {{
+            background-color: {theme['card_bg']} !important;
+            color: {theme['text']} !important;
+        }}
+        .react-aria-Popover {{
+            background-color: {theme['bg']} !important;
+        }}
+        .react-aria-ListBox {{
+            background-color: {theme['bg']} !important;
+        }}
+        .react-aria-ListBoxItem {{
+            background-color: {theme['bg']} !important;
+            color: {theme['text']} !important;
+        }}
+        .react-aria-ListBoxItem[data-hovered="true"],
+        .react-aria-ListBoxItem[data-focused="true"] {{
+            background-color: {theme['card_bg']} !important;
         }}
         </style>
         """,
@@ -241,6 +297,204 @@ def get_holdout(city, horizon):
 def get_shap_importance(city, horizon):
     return pd.read_csv(shap_output_path(city, horizon))
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_cv_results(city):
+    return pd.read_csv(results_path_for_city(city))
+
+
+def render_model_findings(theme):
+    st.subheader("Model Performance by City")
+    st.caption("Ridge and Random Forest, 5-fold time-series CV, vs. the naive persistence baseline.")
+
+    tabs = st.tabs([c.title() for c in CITIES])
+    for tab, c in zip(tabs, CITIES):
+        with tab:
+            try:
+                df = get_cv_results(c)
+            except FileNotFoundError:
+                st.warning(f"No CV results found for {c.title()}.")
+                continue
+            for _, row in df.iterrows():
+                horizon = int(row["horizon"])
+                naive_rmse, ridge_rmse, rf_rmse = row["naive_rmse_mean"], row["ridge_rmse_mean"], row["rf_rmse_mean"]
+                best_model = "Ridge" if ridge_rmse <= rf_rmse else "Random Forest"
+                best_rmse = min(ridge_rmse, rf_rmse)
+                if best_rmse < naive_rmse:
+                    improvement = (1 - best_rmse / naive_rmse) * 100
+                    verdict = f"**{best_model}** beats the naive baseline by **{improvement:.1f}%** (RMSE)."
+                else:
+                    verdict = "Neither model beat the naive baseline at this horizon."
+                st.markdown(f"**+{horizon}h horizon** — {verdict}")
+                cols = st.columns(3)
+                cols[0].metric("Naive RMSE", f"{naive_rmse:.1f}")
+                cols[1].metric("Ridge RMSE", f"{ridge_rmse:.1f}")
+                cols[2].metric("RF RMSE", f"{rf_rmse:.1f}")
+                st.write("")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_city_history_all(days=14):
+    data = {}
+    for c in CITIES:
+        try:
+            recent, latest_row, _ = get_history(c, days=days)
+            data[c] = (recent, latest_row)
+        except Exception:
+            data[c] = (None, None)
+    return data
+
+POLLUTANT_COLS = ["aqi_epa", "co", "no2", "o3", "so2", "pm2_5", "pm10"]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_raw_aqi_data(city):
+    df = pd.read_csv(f"data/{city}/raw_aqi_data.csv", parse_dates=["datetime"])
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return df
+
+
+def render_city_eda(city, theme):
+    try:
+        df = get_raw_aqi_data(city)
+    except FileNotFoundError:
+        st.warning(f"No raw data found for {city.title()}.")
+        return
+
+    st.caption(f"{len(df):,} hourly readings · {df['datetime'].min().date()} to {df['datetime'].max().date()}")
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor(theme["bg"])
+    ax.set_facecolor(theme["bg"])
+    ax.plot(df["datetime"], df["aqi_epa"], color="#2563eb", linewidth=0.8)
+    ax.axhline(150, color="orange", linestyle="--", label="Unhealthy (150)")
+    ax.axhline(200, color="red", linestyle="--", label="Very Unhealthy (200)")
+    ax.set_title(f"EPA AQI Over Time — {city.title()}")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("AQI")
+    ax.legend()
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        fig, ax = plt.subplots(figsize=(6, 5))
+        fig.patch.set_facecolor(theme["bg"])
+        sns.heatmap(df[POLLUTANT_COLS].corr(), annot=True, cmap="coolwarm", fmt=".2f", ax=ax)
+        ax.set_title("Pollutant Correlation")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with col2:
+        hourly_avg = df.assign(hour=df["datetime"].dt.hour).groupby("hour")["aqi_epa"].mean()
+        fig, ax = plt.subplots(figsize=(6, 5))
+        fig.patch.set_facecolor(theme["bg"])
+        ax.set_facecolor(theme["bg"])
+        hourly_avg.plot(kind="bar", ax=ax, color="#2563eb")
+        ax.set_xticklabels(hourly_avg.index, rotation=0)
+        ax.set_title("Average AQI by Hour of Day")
+        ax.set_xlabel("Hour")
+        ax.set_ylabel("Average AQI")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+
+def render_cross_city_hourly_pattern(theme):
+    frames = []
+    for c in CITIES:
+        try:
+            df = get_raw_aqi_data(c)
+        except FileNotFoundError:
+            continue
+        hourly = df.assign(hour=df["datetime"].dt.hour).groupby("hour")["aqi_epa"].mean().reset_index()
+        hourly["city"] = c.title()
+        frames.append(hourly)
+    if not frames:
+        return
+    combined = pd.concat(frames, ignore_index=True)
+    chart = (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=2)
+        .encode(
+            x=alt.X("hour:O", title="Hour of Day", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("aqi_epa:Q", title="Average AQI"),
+            color=alt.Color("city:N", legend=alt.Legend(title=None)),
+            tooltip=["city", "hour", "aqi_epa"],
+        )
+        .properties(height=280, background=theme["bg"])
+        .configure_axis(grid=True, gridColor=theme["card_border"], labelColor=theme["muted"], titleColor=theme["muted"])
+        .configure_legend(labelColor=theme["text"], titleColor=theme["text"], labelFontSize=12)
+        .configure_view(strokeWidth=0, fill=theme["bg"])
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def render_eda_section(theme):
+    st.subheader("City Comparison")
+    st.caption("Current conditions and recent 14-day AQI trends across all monitored cities.")
+
+    city_data = get_city_history_all(days=14)
+
+    compare_rows = [
+        {"city": c.title(), "aqi": latest_row["aqi_epa"]}
+        for c in CITIES
+        if (latest_row := city_data[c][1]) is not None
+    ]
+    if compare_rows:
+        compare_df = pd.DataFrame(compare_rows)
+        chart = (
+            alt.Chart(compare_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("city:N", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("aqi:Q", title="Current AQI"),
+                color=alt.Color("aqi:Q", scale=alt.Scale(scheme="redyellowgreen", reverse=True), legend=None),
+                tooltip=["city", "aqi"],
+            )
+            .properties(height=240, background=theme["bg"])
+            .configure_axis(grid=True, gridColor=theme["card_border"], labelColor=theme["muted"], titleColor=theme["muted"])
+            .configure_view(strokeWidth=0, fill=theme["bg"])
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    trend_frames = []
+    for c in CITIES:
+        recent, _ = city_data[c]
+        if recent is not None:
+            tmp = recent.copy()
+            tmp["city"] = c.title()
+            trend_frames.append(tmp)
+    if trend_frames:
+        trend_df = pd.concat(trend_frames, ignore_index=True)
+        chart = (
+            alt.Chart(trend_df)
+            .mark_line(strokeWidth=2)
+            .encode(
+                x=alt.X("datetime:T", title=None, axis=alt.Axis(format="%b %d, %H:%M")),
+                y=alt.Y("aqi_epa:Q", title="AQI"),
+                color=alt.Color("city:N", legend=alt.Legend(title=None)),
+                tooltip=["city", "datetime:T", "aqi_epa:Q"],
+            )
+            .properties(height=280, background=theme["bg"])
+            .configure_axis(grid=True, gridColor=theme["card_border"], labelColor=theme["muted"], titleColor=theme["muted"])
+            .configure_legend(labelColor=theme["text"], titleColor=theme["text"], labelFontSize=12)
+            .configure_view(strokeWidth=0, fill=theme["bg"])
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    st.divider()
+    st.subheader("Hourly AQI Pattern by City")
+    st.caption("Average AQI by hour of day — reveals daily pollution rhythms across cities.")
+    render_cross_city_hourly_pattern(theme)
+
+    st.divider()
+    st.subheader("Per-City Exploratory Analysis")
+    eda_tabs = st.tabs([c.title() for c in CITIES])
+    for tab, c in zip(eda_tabs, CITIES):
+        with tab:
+            render_city_eda(c, theme)
 
 def render_gauge(aqi_value, color, theme):
     fig = go.Figure(go.Indicator(
@@ -310,7 +564,7 @@ def render_trend_chart(history, theme):
         alt.Chart(history)
         .mark_line(color=theme["accent"], strokeWidth=2)
         .encode(
-            x=alt.X("datetime:T", title=None),
+            x=alt.X("datetime:T", title=None, axis=alt.Axis(format="%b %d, %H:%M")),
             y=alt.Y("aqi_epa:Q", title="AQI"),
             tooltip=[alt.Tooltip("datetime:T", title="Time"), alt.Tooltip("aqi_epa:Q", title="AQI", format=".0f")],
         )
@@ -328,7 +582,7 @@ def render_holdout_chart(df, theme):
         alt.Chart(long_df)
         .mark_line()
         .encode(
-            x=alt.X("datetime:T", title=None),
+            x=alt.X("datetime:T", title=None, axis=alt.Axis(format="%b %d, %H:%M")),
             y=alt.Y("aqi:Q", title="AQI"),
             color=alt.Color("type:N", scale=alt.Scale(domain=["actual", "predicted"],
                                                         range=[theme["accent"], "#8a8d94"]),
@@ -337,6 +591,7 @@ def render_holdout_chart(df, theme):
         )
         .properties(height=260, background=theme["bg"])
         .configure_axis(grid=True, gridColor=theme["card_border"], labelColor=theme["muted"], titleColor=theme["muted"])
+        .configure_legend(labelColor=theme["text"], titleColor=theme["text"], labelFontSize=12)
         .configure_view(strokeWidth=0, fill=theme["bg"])
     )
     st.altair_chart(chart, use_container_width=True)
@@ -360,29 +615,7 @@ def render_shap_chart(importance_df, theme):
     st.altair_chart(chart, use_container_width=True)
 
 
-def render_model_story():
-    with st.expander("How this model was built"):
-        st.markdown("""
-        **The redesign:** Targets were originally point-in-time AQI values at +24h/+48h/+72h.
-        After confirming the correct spec, all three targets were redefined as non-overlapping
-        24-hour window averages.
-
-        **Model selection:** Ridge regression outperformed both a naive persistence baseline and
-        Random Forest at every horizon during 5-fold time-series cross-validation.
-
-        **A collinearity finding:** Temperature and pressure are strongly negatively correlated
-        (r = -0.80) in this dataset. This explains why SHAP (on Ridge) and Random Forest's built-in
-        importance disagree on which feature ranks higher at longer horizons — both are largely
-        encoding the same underlying weather-system signal.
-
-        **Validation:** All reported metrics come from a genuine 90-day holdout — the deployed
-        model was trained excluding this window entirely, so results reflect real forecasting
-        performance, not the model recalling data it was trained on.
-        """)
-
-
 def render_whatif_simulator(theme, city):
-    st.divider()
     st.subheader("What-If Simulator")
     st.caption("Adjust conditions below and see how the model's forecast changes in real time.")
 
@@ -424,7 +657,7 @@ def render_whatif_simulator(theme, city):
     st.write("")
     st.markdown(
         f"""
-        <div class="forecast-card hero" style="--card-accent: {color}; max-width: 380px;">
+        <div class="forecast-card hero" style="background: linear-gradient(160deg, {color}ee, {color}99); max-width: 380px;">
             <div class="day-label">Simulated +{horizon // 24}-day AQI</div>
             <div class="aqi-value">{predicted:.0f}</div>
             <div class="category">{category}</div>
@@ -524,7 +757,6 @@ def main():
         unsafe_allow_html=True,
     )
 
-    render_model_story()
 
     with st.spinner("Loading live data..."):
         try:
@@ -594,10 +826,18 @@ def main():
 
     flagged_days = check_hazard_alert(results, day_labels)
     if flagged_days:
-        items = "; ".join(f"<b>{label}</b>: {aqi:.0f} ({cat})" for label, aqi, cat in flagged_days)
+        chips = "".join(
+            f'<div class="hazard-chip">{label}: <b>{aqi:.0f}</b> ({cat})</div>'
+            for label, aqi, cat in flagged_days
+        )
         st.markdown(
-            f'<div class="hazard-alert"><b>Air Quality Alert</b> \u2014 {items}. '
-            f'Limit outdoor exposure and consider wearing a mask if you must go outside.</div>',
+            f"""
+            <div class="hazard-alert-v2">
+                <div class="alert-title">⚠ Air Quality Alert</div>
+                <div class="hazard-chip-row">{chips}</div>
+                <div class="hazard-footer">Limit outdoor exposure and consider wearing a mask if you must go outside.</div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
@@ -612,44 +852,48 @@ def main():
             st.write("")
 
     st.write("")
-    render_whatif_simulator(theme, city)
-    st.divider()
-    st.subheader("Voice Briefing")
-    render_voice_briefing(results, day_labels, current_aqi, category)
-    render_exposure_calculator(current_aqi, theme)
+    tab_forecast, tab_model, tab_compare = st.tabs(["Forecast Details", "Model & Validation", "City Comparison"])
 
-    st.write("")
-    st.divider()
+    with tab_forecast:
+        render_whatif_simulator(theme, city)
+        st.divider()
+        st.subheader("Voice Briefing")
+        render_voice_briefing(results, day_labels, current_aqi, category)
+        render_exposure_calculator(current_aqi, theme)
+        st.divider()
+        st.subheader("Recent AQI Trend")
+        render_trend_chart(history, theme)
 
-    st.subheader("Recent AQI Trend")
-    render_trend_chart(history, theme)
+    with tab_model:
+        render_model_findings(theme)
+        st.divider()
+        st.subheader("Model Validation")
+        st.caption("Genuine holdout: Ridge trained excluding this window entirely, so this reflects real forecasting performance, not recall.")
+        horizon_choice = st.radio("Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="holdout_horizon")
+        try:
+            holdout_df, holdout_rmse = get_holdout(city, horizon_choice)
+            st.write(f"Holdout RMSE: **\u00b1{holdout_rmse:.2f}**")
+            render_holdout_chart(holdout_df, theme)
+        except FileNotFoundError:
+            st.warning(f"Holdout results not found for {city.title()}.")
+        st.divider()
+        st.subheader("Why This Prediction")
+        st.caption("Top features driving the forecast, by mean SHAP value.")
+        shap_horizon = st.radio("SHAP Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="shap_horizon")
+        try:
+            importance_df = get_shap_importance(city, shap_horizon)
+            render_shap_chart(importance_df, theme)
+        except FileNotFoundError:
+            st.warning(f"SHAP results not found for {city.title()}.")
 
-    st.divider()
-    st.subheader("Model Validation")
-    st.caption("Genuine holdout: Ridge trained excluding this window entirely, so this reflects real forecasting performance, not recall.")
-    horizon_choice = st.radio("Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="holdout_horizon")
-    try:
-        holdout_df, holdout_rmse = get_holdout(city, horizon_choice)
-        st.write(f"Holdout RMSE: **\u00b1{holdout_rmse:.2f}**")
-        render_holdout_chart(holdout_df, theme)
-    except FileNotFoundError:
-        st.warning(f"Holdout results not found for {city.title()} - run `python src/validate_holdout.py --city {city}` first.")
-
-    st.divider()
-    st.subheader("Why This Prediction")
-    st.caption("Top features driving the forecast, by mean SHAP value.")
-    shap_horizon = st.radio("SHAP Horizon", [24, 48, 72], format_func=lambda h: f"+{h // 24} day{'s' if h > 24 else ''}", horizontal=True, key="shap_horizon")
-    try:
-        importance_df = get_shap_importance(city, shap_horizon)
-        render_shap_chart(importance_df, theme)
-    except FileNotFoundError:
-        st.warning(f"SHAP results not found for {city.title()} - run `python src/compute_shap.py --city {city}` first.")
+    with tab_compare:
+        render_eda_section(theme)
 
     st.write("")
     if st.button("Refresh"):
         st.cache_data.clear()
         st.rerun()
-
+        
 
 if __name__ == "__main__":
     main()
