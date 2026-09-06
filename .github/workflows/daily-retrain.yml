@@ -2,7 +2,8 @@ name: Daily Retraining
 
 # Runs once a day: reads the latest features from the Hopsworks Feature
 # Store (with local CSV fallback, per train.py's built-in logic) and
-# retrains Ridge + RF models for all three horizons, saving CV metrics.
+# retrains Ridge + RF models for all three horizons, per city, saving
+# CV metrics.
 
 on:
   schedule:
@@ -13,6 +14,10 @@ jobs:
   retrain:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false      # one city's failure shouldn't cancel the others
+      matrix:
+        city: [bahawalpur, lahore, islamabad]
 
     steps:
       - name: Check out repository
@@ -31,13 +36,13 @@ jobs:
       - name: Retrain models
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-        run: python src/train.py
+        run: python src/train.py --city ${{ matrix.city }}
 
       - name: Upload trained models as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trained-models-${{ github.run_number }}
+          name: trained-models-${{ matrix.city }}-${{ github.run_number }}
           path: |
-            src/*.pkl
-            data/cv_validation_results.csv
+            src/*${{ matrix.city == 'bahawalpur' && '' || matrix.city }}*.pkl
+            data/cv_validation_results*.csv
           retention-days: 30
