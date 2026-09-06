@@ -132,4 +132,4 @@ Ridge consistently outperformed both the naive baseline and Random Forest, with 
 
 ## Acknowledgements
 
-Built under the 10 Pearls Data Science Internship, with guidance from Sir Sohail Sajid.
+Built under the 10 Pearls Data Science Shine Internship
