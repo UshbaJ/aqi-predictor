@@ -11,7 +11,9 @@ Usage:
 """
 
 import os
+import time
 import argparse
+import requests
 import hopsworks
 from dotenv import load_dotenv
 
@@ -90,6 +92,32 @@ def align_dtypes_to_schema(df, fg):
     return df
 
 
+def insert_with_retry(fg, df, city, max_retries=3, base_delay=5):
+    """
+    Insert into the feature group with exponential backoff, since Hopsworks'
+    materialization job launch occasionally drops the connection mid-request
+    (RemoteDisconnected / ConnectionError). Mirrors features.py's read-retry pattern.
+    Only retries on connection-level failures - real errors (bad schema, auth,
+    bad dtypes) should still fail immediately and loudly.
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            fg.insert(df)
+            return
+        except (requests.exceptions.ConnectionError, ConnectionResetError) as e:
+            last_error = e
+            if attempt < max_retries:
+                delay = base_delay * (3 ** (attempt - 1))  # 5s, 15s, 45s
+                print(f"[{city}] Hopsworks insert attempt {attempt}/{max_retries} failed "
+                      f"({type(e).__name__}); retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                print(f"[{city}] Hopsworks insert failed after {max_retries} attempts.")
+
+    raise last_error
+
+
 def create_or_get_feature_group(fs, city):
     """Create the feature group for this city if it doesn't exist yet, or get the existing one."""
     fg_name = feature_group_name(city)
@@ -130,7 +158,7 @@ def run_for_city(city):
     df = align_dtypes_to_schema(df, fg)
     print(f"[{city}] Aligned dataframe dtypes to feature group schema. Inserting data...")
 
-    fg.insert(df)
+    insert_with_retry(fg, df, city)
     print(f"[{city}] Insert complete. Check the Hopsworks UI (Feature Store) to confirm the data landed.")
 
 

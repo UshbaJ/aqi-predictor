@@ -16,6 +16,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false      # one city's failure shouldn't cancel the others
+      max-parallel: 1        # run cities sequentially — avoids hitting Hopsworks'
+                              # materialization-job launcher with 3 simultaneous
+                              # requests, which we suspect contributes to the
+                              # intermittent RemoteDisconnected errors
       matrix:
         city: [bahawalpur, lahore, islamabad]
 
